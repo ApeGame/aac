@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus/clique"
+	"github.com/ethereum/go-ethereum/consensus/posa"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -133,6 +134,42 @@ func (api *SignerAPI) determineSignatureFormat(ctx context.Context, contentType 
 			},
 		}
 		req = &SignDataRequest{ContentType: mediaType, Rawdata: []byte(msg), Messages: messages, Hash: sighash}
+
+	case apitypes.ApplicationPosa.Mime:
+		stringData, ok := data.(string)
+		if !ok {
+			return nil, useEthereumV, fmt.Errorf("input for %v must be an hex-encoded string", apitypes.ApplicationPosa.Mime)
+		}
+		cliqueData, err := hexutil.Decode(stringData)
+		if err != nil {
+			return nil, useEthereumV, err
+		}
+		header := &types.Header{}
+		if err := rlp.DecodeBytes(cliqueData, header); err != nil {
+			return nil, useEthereumV, err
+		}
+		// The incoming clique header is already truncated, sent to us with a extradata already shortened
+		if len(header.Extra) < 65 {
+			// Need to add it back, to get a suitable length for hashing
+			newExtra := make([]byte, len(header.Extra)+65)
+			copy(newExtra, header.Extra)
+			header.Extra = newExtra
+		}
+		// Get back the rlp data, encoded by us
+		sighash, posaRlp, err := posaHeaderHashAndRlp(header)
+		if err != nil {
+			return nil, useEthereumV, err
+		}
+		messages := []*apitypes.NameValueType{
+			{
+				Name:  "Posa header",
+				Typ:   "posa",
+				Value: fmt.Sprintf("posa header %d [0x%x]", header.Number, header.Hash()),
+			},
+		}
+		useEthereumV = false
+		req = &SignDataRequest{ContentType: mediaType, Rawdata: posaRlp, Messages: messages, Hash: sighash}
+
 	case apitypes.ApplicationClique.Mime:
 		// Clique is the Ethereum PoA standard
 		stringData, ok := data.(string)
@@ -218,6 +255,16 @@ func cliqueHeaderHashAndRlp(header *types.Header) (hash, rlp []byte, err error) 
 	}
 	rlp = clique.CliqueRLP(header)
 	hash = clique.SealHash(header).Bytes()
+	return hash, rlp, err
+}
+
+func posaHeaderHashAndRlp(header *types.Header) (hash, rlp []byte, err error) {
+	if len(header.Extra) < 65 {
+		err = fmt.Errorf("posa header extradata too short, %d < 65", len(header.Extra))
+		return
+	}
+	rlp = posa.RLP(header)
+	hash = posa.SealHash(header).Bytes()
 	return hash, rlp, err
 }
 
